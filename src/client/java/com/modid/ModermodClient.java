@@ -1,5 +1,7 @@
 package com.modid;
 
+import com.mojang.brigadier.arguments.StringArgumentType;
+
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
@@ -10,78 +12,99 @@ import net.minecraft.network.chat.Component;
 public class ModermodClient implements ClientModInitializer {
 
     private boolean isEnabled = false;
+    private String targetPlayer = ""; // Ник игрока, которого проверяем
+    private String lastAiAnswer = "";
 
     @Override
     public void onInitializeClient() {
-        // При запуске игры загружаем (или создаем) конфиг
         ModConfig.getInstance(); 
-        System.out.println("AI Moderation Mod Loaded. Config checked.");
 
         // --- КОМАНДЫ ---
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("aimod")
-                .then(ClientCommandManager.literal("start")
-                    .executes(context -> {
-                        isEnabled = true;
-                        // При старте перезагрузим конфиг (вдруг ты его поменял, пока игра была запущена)
-                        ModConfig.getInstance().load();
-                        context.getSource().sendFeedback(Component.literal("§a[AI] §fЗапущен. Триггер: " + ModConfig.getInstance().triggerPhrase));
-                        return 1;
-                    }))
+                
+                // ГЛАВНАЯ КОМАНДА: /aimod check <Ник>
+                // Пример: /aimod check Steve
+                .then(ClientCommandManager.literal("check")
+                    .then(ClientCommandManager.argument("nickname", StringArgumentType.word())
+                        .executes(context -> {
+                            String nick = StringArgumentType.getString(context, "nickname");
+                            
+                            // Включаем бота
+                            isEnabled = true;
+                            targetPlayer = nick;
+                            
+                            // Очищаем старую историю, так как это новый игрок
+                            AIResponder.clearHistory();
+                            lastAiAnswer = "";
+                            
+                            context.getSource().sendFeedback(Component.literal("§a[AI] §fПроверка игрока §e" + nick + " §fначата! Бот активен."));
+                            return 1;
+                        })))
+
                 .then(ClientCommandManager.literal("stop")
                     .executes(context -> {
                         isEnabled = false;
+                        targetPlayer = "";
                         context.getSource().sendFeedback(Component.literal("§c[AI] §fОстановлен."));
                         return 1;
                     }))
-                .then(ClientCommandManager.literal("clear")
-                    .executes(context -> {
-                        AIResponder.clearHistory();
-                        context.getSource().sendFeedback(Component.literal("§e[AI] §fИстория очищена."));
-                        return 1;
-                    }))
-                // Команда для принудительной перезагрузки конфига без рестарта
+                
+                // Перезагрузка конфига (если поменял ключ)
                 .then(ClientCommandManager.literal("reload")
                     .executes(context -> {
                         ModConfig.getInstance().load();
-                        context.getSource().sendFeedback(Component.literal("§b[AI] §fКонфиг перезагружен с диска!"));
+                        context.getSource().sendFeedback(Component.literal("§b[AI] §fКонфиг перезагружен!"));
                         return 1;
                     }))
             );
         });
 
-        // --- ПРОСЛУШКА ЧАТА ---
+        // --- ЛОГИКА ЧАТА ---
         ClientReceiveMessageEvents.CHAT.register((message, signedMessage, sender, params, receptionTimestamp) -> {
-            if (!isEnabled) return;
-            
-            Minecraft mc = Minecraft.getInstance();
-            if (mc.player == null) return;
+            processMessage(message.getString());
+        });
 
-            String text = message.getString();
-            String myName = mc.player.getName().getString();
-            
-            // Защита от самого себя
-            if (text.contains(myName) || text.startsWith("<" + myName + ">")) {
-                return;
-            }
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
+            if (!overlay) processMessage(message.getString());
+        });
+    }
 
-            if (text.trim().isEmpty()) return;
+    private void processMessage(String text) {
+        // 1. Если выключено или нет цели - молчим
+        if (!isEnabled || targetPlayer.isEmpty()) return;
+        
+        if (text == null || text.trim().isEmpty()) return;
 
-            // --- ПРОВЕРКА НА ТРИГГЕР ---
-            String trigger = ModConfig.getInstance().triggerPhrase;
-            
-            // Если триггер задан в конфиге, но сообщения его НЕ содержит — игнорируем
-            if (!trigger.isEmpty() && !text.contains(trigger)) {
-                return;
-            }
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return;
 
-            // Отправляем в AI
-            AIResponder.askAI(text, (aiAnswer) -> {
-                mc.execute(() -> {
-                    if (mc.player != null) {
-                        mc.player.connection.sendChat(aiAnswer);
-                    }
-                });
+        // 2. ФИЛЬТР ПО НИКУ (САМОЕ ВАЖНОЕ)
+        // Мы проверяем, содержится ли ник цели в сообщении.
+        // Обычно формат: "<Steve> привет" или "[G] Steve: привет"
+        // Поэтому просто contains(targetPlayer) сработает отлично.
+        if (!text.contains(targetPlayer)) {
+            return; // Это сообщение не от нашего подозреваемого -> игнор
+        }
+
+        // 3. Защита от самого себя (на всякий случай)
+        String myName = mc.player.getName().getString();
+        if (text.contains(myName) && (text.startsWith(myName) || text.contains("<" + myName + ">"))) {
+            return;
+        }
+
+        // 4. Защита от эха бота
+        if (!lastAiAnswer.isEmpty() && text.contains(lastAiAnswer)) {
+            return;
+        }
+
+        // Отправляем в AI
+        AIResponder.askAI(text, (aiAnswer) -> {
+            mc.execute(() -> {
+                if (mc.player != null) {
+                    lastAiAnswer = aiAnswer;
+                    mc.player.connection.sendChat(aiAnswer);
+                }
             });
         });
     }

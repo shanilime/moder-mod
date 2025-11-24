@@ -22,46 +22,34 @@ public class AIResponder {
     private static final List<JsonObject> conversationHistory = new ArrayList<>();
     private static final int MAX_HISTORY = 15;
 
-    // --- ОЧИСТКА ВХОДЯЩЕГО (От мусора сервера) ---
-    private static String cleanInput(String rawMessage, String trigger) {
+    private static String cleanInput(String rawMessage) {
         String text = rawMessage;
-        if (trigger != null && !trigger.isEmpty()) {
-            text = text.replace(trigger, "");
-        }
-        text = text.replace("[@]", "");
-        text = text.replaceAll("^<[^>]+>\\s*", "").replaceAll("^\\[[^]]+\\]\\s*", "");
+        // Удаляем [CHECK] и [@] (они могут быть, а могут и не быть)
+        text = text.replace("[CHECK]", "").replace("[@]", "");
+        
+        // Удаляем никнеймы и префиксы в начале строки (всё до двоеточия или >)
+        // Пример: "<Steve> Привет" -> "Привет"
+        // Пример: "[L] Steve: Привет" -> "Привет"
+        text = text.replaceAll("^.*[:>]\\s*", "");
+        
         return text.trim();
     }
 
-    // --- ОЧИСТКА ИСХОДЯЩЕГО (ЧТОБЫ НЕ КИКНУЛО) ---
     private static String sanitizeResponse(String aiText) {
         if (aiText == null) return "";
-
-        // 1. Убираем переносы строк (САМАЯ ЧАСТАЯ ПРИЧИНА КИКА)
-        // Заменяем их на пробел, чтобы слова не склеились
-        String safe = aiText.replace("\n", " ").replace("\r", " ");
-
-        // 2. Убираем знак параграфа (цвета), за это кикает
-        safe = safe.replace("§", "");
-
-        // 3. Убираем лишние кавычки
-        safe = safe.replace("\"", "");
-
-        // 4. Убираем двойные пробелы, которые могли появиться после удаления \n
-        safe = safe.replaceAll("\\s+", " ");
-
-        return safe.trim();
+        return aiText.replace("\n", " ").replace("\r", " ").replace("§", "").replace("\"", "").trim();
     }
 
     public static void askAI(String playerMessage, Consumer<String> callback) {
         ModConfig config = ModConfig.getInstance();
         
         if (config.apiKey.isEmpty()) {
-            System.err.println("ОШИБКА: API Key не указан в конфиге!");
+            System.err.println("ОШИБКА: Нет ключа!");
             return;
         }
 
-        String cleanText = cleanInput(playerMessage, config.triggerPhrase);
+        // Чистим
+        String cleanText = cleanInput(playerMessage);
         if (cleanText.isEmpty()) return;
 
         CompletableFuture.runAsync(() -> {
@@ -80,10 +68,9 @@ public class AIResponder {
                 JsonObject jsonBody = new JsonObject();
                 jsonBody.addProperty("model", config.model);
                 jsonBody.addProperty("temperature", config.temperature);
-                jsonBody.addProperty("max_tokens", 300);
+                jsonBody.addProperty("max_tokens", 350);
 
                 JsonArray messages = new JsonArray();
-                
                 JsonObject systemMsg = new JsonObject();
                 systemMsg.addProperty("role", "system");
                 systemMsg.addProperty("content", config.systemPrompt);
@@ -114,11 +101,7 @@ public class AIResponder {
                                 .getAsJsonObject("message")
                                 .get("content").getAsString();
                         
-                        // --- ВАЖНО: ЧИСТИМ ОТВЕТ ПЕРЕД ОТПРАВКОЙ ---
                         String safeReply = sanitizeResponse(aiReply);
-
-                        // Также убираем теги, если бот их все-таки сгенерировал
-                        safeReply = safeReply.replace("[@]", "").replace(config.triggerPhrase, "");
 
                         JsonObject botMsg = new JsonObject();
                         botMsg.addProperty("role", "assistant");
